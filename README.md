@@ -1,5 +1,8 @@
+# DescReg
 
-# Code for **Background Learnable Cascade for Zero-Shot Object Detection** 
+Implementation of AAAI-2024 paper: **Zero-Shot Aerial Object Detection with Visual Description Regularization**
+
+This implementation is built upon the [mmdetection](https://github.com/open-mmlab/mmdetection) framework and the [BLC](https://github.com/zhengye1995/BLC) codebase (*Background Learnable Cascade for Zero-Shot Object Detection*, ACCV 2020). The original BLC instructions are kept below.
 
 ## Code requirements
 + python: python3.7
