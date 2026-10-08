@@ -144,7 +144,8 @@ class BaseDetector(nn.Module):
             h, w, _ = img_meta['img_shape']
             img_show = img[:h, :w, :]
 
-            bboxes = np.vstack(bbox_result)
+            # bboxes = np.vstack(bbox_result)
+            bboxes = np.vstack([bbox for i, bbox in enumerate(bbox_result)])
             # draw segmentation masks
             if segm_result is not None:
                 segms = mmcv.concat_list(segm_result)
@@ -160,9 +161,71 @@ class BaseDetector(nn.Module):
                 for i, bbox in enumerate(bbox_result)
             ]
             labels = np.concatenate(labels)
-            mmcv.imshow_det_bboxes(
+            paths = img_meta['filename'].split('.')
+            save_img_file = paths[0]  + "_det."  + paths[1]
+            paths = save_img_file.split('/')
+            paths[2] += '_detimg'
+            save_img_file = '/'.join(paths)
+            # want_label = 7
+            # if want_label in labels and np.any(bboxes[labels==want_label][:, -1]>0.1):
+            gtlabels = data['gt_labels'][0][0].numpy()
+            gtboxes = data['gt_bboxes'][0][0].numpy()
+            # unseen_ids = [16, 17, 18, 19]
+            unseen_ids = [11, 12, 13, 14]
+            # unseen_ids = [3, 6, 7, 11, 23, 24, 27, 36, 38, 41, 43, 56]
+
+            gtboxes_unseenonly = np.array([gtboxes[i] for i, g in enumerate(gtlabels) if g in unseen_ids])
+            gtlabels_unseenonly = np.array([g for i, g in enumerate(gtlabels) if g in unseen_ids])
+
+            boxes_keep = np.array([bboxes[i] for i, g in enumerate(labels) if g in unseen_ids])
+            labels_keep = np.array([g for i, g in enumerate(labels) if g in unseen_ids])
+            mmcv.imshow_bboxes(
                 img_show,
-                bboxes,
-                labels,
-                class_names=class_names,
-                score_thr=score_thr)
+                gtboxes_unseenonly,
+                colors='red',
+                show=False
+            )
+            # mmcv.imshow_det_bboxes(
+            #     img_show,
+            #     gtboxes_unseenonly,
+            #     gtlabels_unseenonly,
+            #     class_names=class_names,
+            #     bbox_color='red',
+            #     text_color='red',
+            #     show=False
+            # )
+            if len(labels_keep) > 0:
+                mmcv.imshow_det_bboxes(
+                    img_show,
+                    boxes_keep,
+                    labels_keep,
+                    class_names=class_names,
+                    score_thr=score_thr,
+                    show=False,
+                    out_file=save_img_file
+                )
+
+
+            # for class_id, class_name in enumerate(self.CLASSES):
+            # # for i, (class_id, class_name) in enumerate(zip([13, 16, 17, 18, 19], ['tenniscourt', 'airport', 'basketballcourt', 'groundtrackfield', 'windmill'])):
+            #     img_show = img[:h, :w, :].copy()
+            #     bboxes = np.vstack([bbox for i, bbox in enumerate(bbox_result) if i == class_id])
+            #     labels = [
+            #         np.full(bbox.shape[0], i, dtype=np.int32)
+            #         for i, bbox in enumerate(bbox_result) if i == class_id
+            #     ]
+            #     labels = np.concatenate(labels)
+            #     paths = img_meta['filename'].split('.')
+            #     save_img_file = paths[0] + "_" + class_name + "_det."  + paths[1]
+            #     paths = save_img_file.split('/')
+            #     paths[2] += '_detimg'
+            #     save_img_file = '/'.join(paths)
+            #     mmcv.imshow_det_bboxes(
+            #         img_show,
+            #         bboxes,
+            #         labels,
+            #         class_names=class_names,
+            #         score_thr=score_thr,
+            #         show=False,
+            #         out_file=save_img_file
+            #     )

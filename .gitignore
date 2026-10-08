@@ -1,0 +1,30 @@
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+
+# Datasets (download separately, see README)
+data/dior/
+data/dota/
+data/visdrone/
+data/xview/
+data/*.npy
+*.zip
+
+# Weights, checkpoints and outputs
+pretrained/
+*.pth
+checkpoints/*
+!checkpoints/.gitkeep
+results/*
+!results/.gitkeep
+work_dirs/

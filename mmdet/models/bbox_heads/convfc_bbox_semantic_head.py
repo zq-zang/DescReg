@@ -4,7 +4,9 @@ import torch
 from ..registry import HEADS
 from ..utils import ConvModule
 from .bbox_head_semantic import BBoxSemanticHead
+import torch.nn.functional as F
 
+import numpy as np
 
 @HEADS.register_module
 class ConvFCSemanticBBoxHead(BBoxSemanticHead):
@@ -17,6 +19,7 @@ class ConvFCSemanticBBoxHead(BBoxSemanticHead):
     """  # noqa: W605
 
     def __init__(self,
+                 train_stage,
                  num_shared_convs=0,
                  num_shared_fcs=0,
                  num_semantic_convs=0,
@@ -75,12 +78,40 @@ class ConvFCSemanticBBoxHead(BBoxSemanticHead):
 
         self.relu = nn.ReLU(inplace=True)
         # reconstruct fc_semantic and fc_reg since input channels are changed
-        if self.with_semantic:
-            self.fc_semantic = nn.Linear(self.semantic_last_dim, semantic_dims)
-            if self.voc is not None:
-                self.kernel_semantic = nn.Linear(self.voc.shape[1], self.vec.shape[0])  # n*300
-            else:
-                self.kernel_semantic = nn.Linear(self.vec.shape[1], self.vec.shape[1])
+        self.train_stage = train_stage
+        if self.train_stage == 1:
+            self.fc_classifier = nn.Linear(self.semantic_last_dim, self.num_classes)
+        elif self.train_stage == 2:
+            self.fc_classifier = nn.Linear(self.semantic_last_dim, self.num_classes)
+            self.fc_projector = nn.Linear(self.semantic_last_dim, self.vec.shape[0], bias=False)
+            self.fc_projector_semantic = nn.Linear(self.vec.shape[0], self.semantic_last_dim, bias=False)
+            self.fc_projector_semantic = nn.Sequential(
+                nn.Linear(self.vec.shape[0], 128, bias=True),
+                nn.ReLU(),
+                nn.Linear(128, self.semantic_last_dim, bias=False),
+            )
+            # self.group_labels = torch.tensor([0, 4, 5, 1, 5, 1, 1, 5, 6, 1, 1, 4, 2, 5, 3, 1, 4, 1, 3, 2, 4]).cuda()# dior
+            # self.adj_matrix = torch.eq(self.group_labels.view(-1, 1), self.group_labels.view(-1, 1).t()).float().cuda()
+            # self.adj_matrix = self.adj_matrix + torch.eye(21).cuda()
+            # self.adj_matrix = torch.tensor(np.load('./data/dior/sim_matrix_dior.npy')).float().cuda() + torch.eye(21).cuda()
+            # self.fc_projector_semantic_2 = nn.Linear(self.semantic_last_dim, self.semantic_last_dim, bias=False)
+
+
+        elif self.train_stage == 3:
+            self.fc_projector = nn.Linear(self.semantic_last_dim, semantic_dims, bias=False)
+            self.fc_projector_semantic = nn.Linear(self.semantic_last_dim, semantic_dims, bias=False)
+
+            self.graph_relation_mixer = torch.nn.Parameter(torch.randn(21, 21))
+        else:
+            raise NotImplementedError
+
+        self.use_sigmoid = kwargs['loss_semantic'].use_sigmoid
+        # if self.with_semantic:
+        #     self.fc_semantic = nn.Linear(self.semantic_last_dim, semantic_dims, bias=False)
+        #     # if self.voc is not None:
+        #     #     self.kernel_semantic = nn.Linear(self.voc.shape[1], self.vec.shape[0])  # n*300
+        #     # else:
+        #     self.kernel_semantic = nn.Linear(self.vec.shape[1], self.vec.shape[1])
 
         if self.with_reg and self.reg_with_semantic:
             self.fc_reg_sem = nn.Linear(self.reg_last_dim, semantic_dims)
@@ -146,6 +177,12 @@ class ConvFCSemanticBBoxHead(BBoxSemanticHead):
                 if isinstance(m, nn.Linear):
                     nn.init.xavier_uniform_(m.weight)
                     nn.init.constant_(m.bias, 0)
+        if self.train_stage==1:
+            nn.init.normal_(self.fc_classifier.weight, 0, 0.001)
+            nn.init.constant_(self.fc_classifier.bias, 0)
+        # elif self.train_stage==2:
+        #     nn.init.normal_(self.fc_projector.weight, 0, 0.001)
+        #     nn.init.normal_(self.fc_projector_semantic.weight, 0, 0.001)
 
     def forward(self, x, res_feats=None, context_feats=None, return_feats=False, resturn_center_feats=False):
         # shared part
@@ -182,16 +219,118 @@ class ConvFCSemanticBBoxHead(BBoxSemanticHead):
             x_reg = self.relu(fc(x_reg))
 
         if self.with_semantic:
-            semantic_feature = self.fc_semantic(x_semantic)
-            if self.voc is not None:
-                semantic_score = self.kernel_semantic(self.voc)
-                if res_feats is not None:
-                    semantic_score += self.fc_res(res_feats)
-                res_feats = semantic_score
+            # semantic_feature = self.fc_semantic(x_semantic)
+            # if self.voc is not None:
+            #     semantic_score = self.kernel_semantic(self.voc)
+            #     if res_feats is not None:
+            #         semantic_score += self.fc_res(res_feats)
+            #     res_feats = semantic_score
+            #
+            #     semantic_score = torch.mm(semantic_score, self.vec)
+            #     semantic_score = torch.tanh(semantic_score)
+            #     semantic_score = torch.mm(semantic_feature, semantic_score)
 
-                semantic_score = torch.mm(semantic_score, self.vec)
-                semantic_score = torch.tanh(semantic_score)
-                semantic_score = torch.mm(semantic_feature, semantic_score)
+            # remove D
+            # semantic_feature = self.fc_semantic(x_semantic)
+            # if self.voc is not None:
+            #     semantic_score = self.kernel_semantic(self.vec)
+            #     if res_feats is not None:
+            #         semantic_score += self.fc_res(res_feats)
+            #     res_feats = semantic_score
+            #
+            #     # semantic_score = torch.mm(semantic_score, self.vec)
+            #     semantic_score = torch.tanh(semantic_score)
+            #     semantic_score = torch.mm(semantic_feature, semantic_score.transpose(0,1))
+
+            # simple baseline
+            if self.voc is not None:
+                # if not self.training:
+                #     vec_normalize = nn.functional.normalize(self.vec_full, dim=1)
+                #     semantic_score = torch.mm(semantic_feature, vec_normalize)
+                # else:
+                #     vec_normalize = nn.functional.normalize(self.vec, dim=1)
+                #     semantic_score = torch.mm(semantic_feature, vec_normalize)
+
+                if self.train_stage == 1 and self.training:
+                    semantic_score = self.fc_classifier(x_semantic)
+                elif self.train_stage == 2 and self.training:
+                    # semantic_feature = self.fc_projector(x_semantic)
+                    # mask1 = torch.cat((torch.ones(1, 1), torch.zeros(1, 16)), dim=1).to(self.vec_background_2.device)
+                    # mask2 = torch.cat((torch.zeros(1, 1), torch.ones(1, 16)), dim=1).to(self.vec.device)
+                    # vec_normalize = nn.functional.normalize(self.vec_background_2 * mask1 + self.vec * mask2, dim=0)
+                    # semantic_score_projvisual = torch.mm(semantic_feature, vec_normalize)
+
+                    # semantic_feature = self.fc_projector(x_semantic)
+                    # vec_normalize = nn.functional.normalize(self.vec_background.detach(), dim=0)
+                    # semantic_score_projvisual = torch.mm(semantic_feature, vec_normalize)
+
+                    if self.unseen_class_ids is None:# TODO: combine
+                        mask1 = torch.cat((torch.ones(1, 1), torch.zeros(1, self.num_classes-1)), dim=1).to(self.vec_background.device)
+                        mask2 = torch.cat((torch.zeros(1, 1), torch.ones(1, self.num_classes-1)), dim=1).to(self.vec.device)
+                        seen_embed = self.vec_background * mask1 + self.vec * mask2
+                        full_embed = torch.cat([seen_embed, self.vec_full[:, self.num_classes:]], dim=1)
+                        embedding_projected = self.fc_projector_semantic((full_embed).t()).t()
+                        vec_normalize_full = nn.functional.normalize(embedding_projected, dim=0)
+                        semantic_score = torch.mm(x_semantic, vec_normalize_full[:, :self.num_classes])
+                    else:
+                        # mask1 = torch.cat((torch.ones(1, 1), torch.zeros(1, self.num_classes-1)), dim=1).to(self.vec_background.device)
+                        # mask2 = torch.cat((torch.zeros(1, 1), torch.ones(1, self.num_classes-1)), dim=1).to(self.vec.device)
+                        # seen_embed = self.vec_background * mask1 + self.vec * mask2
+                        # full_embed = torch.cat([seen_embed, self.vec_full[:, torch.tensor(self.unseen_class_ids)]], dim=1)
+                        # embedding_projected = self.fc_projector_semantic((full_embed).t()).t()
+                        self.vec_full_reoder = torch.cat([self.vec_background, self.vec_seen, self.vec_unseen], dim=1).cuda()
+                        embedding_projected = self.fc_projector_semantic((self.vec_full_reoder.contiguous()).t()).t()
+
+                        # # add adj fusion
+                        # embedding_projected = torch.mm(embedding_projected, self.adj_matrix.to(embedding_projected.device))
+                        # # embedding_projected = nn.functional.normalize(embedding_projected, dim=0)
+                        # embedding_projected = F.relu(embedding_projected)
+                        # embedding_projected = self.fc_projector_semantic_2((embedding_projected).t()).t()
+                        # # embedding_projected += embedding_projected_1
+
+                        vec_normalize_full = nn.functional.normalize(embedding_projected, dim=0)
+                        if self.use_sigmoid:
+                            semantic_score = torch.mm(x_semantic, vec_normalize_full[:, 1:self.num_classes])
+                        else:
+                            semantic_score = torch.mm(x_semantic, vec_normalize_full[:, :self.num_classes])
+
+                    # semantic_score = [semantic_score, semantic_score_projvisual]
+
+
+                elif self.train_stage == 2 and not self.training:
+                    # semantic_feature = self.fc_projector(x_semantic)
+                    # self.vec_full[:, 0] = self.vec_background_2[:, 0]
+                    # vec_normalize = nn.functional.normalize(self.vec_full, dim=0)
+                    # semantic_feature_classifier = torch.mm(semantic_feature, vec_normalize)
+
+                    if self.unseen_class_ids is None:  # TODO: combine
+                        self.vec_full[:, 0] = self.vec_background[:, 0]
+                        embedding_projected = self.fc_projector_semantic(self.vec_full.t()).t()
+                        vec_normalize = nn.functional.normalize(embedding_projected, dim=0)
+                        semantic_score = torch.mm(x_semantic, vec_normalize)
+                    else:
+                        # self.vec_full[:, 0] = self.vec_background[:, 0]
+                        # full_embed = torch.cat([self.vec_background, self.vec_full[:, torch.tensor(self.unseen_class_ids)]], dim=1)
+                        # embedding_projected = self.fc_projector_semantic(full_embed.t()).t()
+                        self.vec_full_reoder = torch.cat([self.vec_background, self.vec_seen, self.vec_unseen],dim=1).cuda()
+                        embedding_projected = self.fc_projector_semantic(self.vec_full_reoder.t()).t()
+
+                        # # add adj fusion
+                        # embedding_projected = torch.mm(embedding_projected, self.adj_matrix.to(embedding_projected.device))
+                        # # embedding_projected = nn.functional.normalize(embedding_projected, dim=0)
+                        # embedding_projected = F.relu(embedding_projected)
+                        # embedding_projected = self.fc_projector_semantic_2((embedding_projected).t()).t()
+                        # # embedding_projected += embedding_projected_1
+
+                        vec_normalize = nn.functional.normalize(embedding_projected, dim=0)
+                        semantic_score = torch.mm(x_semantic, vec_normalize)
+
+                    # semantic_score = semantic_feature_classifier
+                    # semantic_score = [semantic_score, semantic_feature_classifier]
+                    # semantic_score = torch.cat([self.fc_classifier(x_semantic),-torch.ones(x_semantic.size(0), 4).to(x_semantic.device)*1e5], dim=1)
+
+                else:
+                    raise NotImplementedError
                 # 1024*49
                 if context_feats is not None:
                     semantic_score = torch.mul(semantic_score, context_feats)
@@ -219,7 +358,14 @@ class ConvFCSemanticBBoxHead(BBoxSemanticHead):
         # elif resturn_center_feats:
         #     return semantic_score, bbox_pred, center_feats
         else:
-            return semantic_score, bbox_pred
+            if not self.training:
+                return semantic_score, bbox_pred, x_semantic
+            elif self.train_stage == 2:
+                return semantic_score, bbox_pred, vec_normalize_full.t()
+                # return semantic_score, bbox_pred, embedding_projected.t()
+            else:
+                return semantic_score, bbox_pred, x_semantic
+
 
 
 @HEADS.register_module

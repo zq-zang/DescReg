@@ -18,11 +18,15 @@ from .imagenet_seen import ImagenetSeen
 from .imagenet_unseen import ImagenetUnseen
 from .vg_seen478 import VGDatasetSeen478
 from .vg_unseen130 import VGDatasetUnSeen130
+from .visdrone_16_4 import VisDrone_16_4
+from .dior_16_4 import Dior_16_4
+from .dota_11_4 import Dota_11_4
+from .xview_48_12 import Xview_48_12
 
 __all__ = [
     'CustomDataset', 'XMLDataset', 'CocoDataset', 'VOCDataset', 'CocoDatasetSeen65', 'CocoDatasetUnseen15',
     'CityscapesDataset', 'GroupSampler', 'DistributedGroupSampler',
     'build_dataloader', 'ConcatDataset', 'RepeatDataset', 'WIDERFaceDataset',
     'DATASETS', 'build_dataset', 'CocoDatasetSeen48', 'CocoDatasetUnseen17', 'ImagenetSeen', 'ImagenetUnseen', 'VGDatasetSeen479', 'VGDatasetUnSeen130',
-    'CocoDataset_65_15', 'CocoDataset_48_17'
+    'CocoDataset_65_15', 'CocoDataset_48_17', 'VisDrone_16_4', 'Dior_16_4', 'Dota_11_4', 'Xview_48_12'
 ]

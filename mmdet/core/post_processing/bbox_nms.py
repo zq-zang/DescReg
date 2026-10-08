@@ -45,8 +45,26 @@ def multiclass_nms(multi_bboxes,
         if score_factors is not None:
             _scores *= score_factors[cls_inds]
         cls_dets = torch.cat([_bboxes, _scores[:, None]], dim=1)
+        # if i >= 17:
+        #     existing_bboxes = torch.cat(bboxes)
+        #     existing_labels = torch.cat(labels)
+        #     mask = existing_bboxes[:, -1] > 0.9
+        #     existing_highscore_bboxes = existing_bboxes[mask]
+        #     cls_dets, _ = nms_op(cls_dets, **nms_cfg_, existing_boxes=existing_highscore_bboxes)
+        #     cls_labels = multi_bboxes.new_full((cls_dets.shape[0], ),
+        #                                        i - 1,
+        #                                        dtype=torch.long)
+        #     bboxes.append(cls_dets)
+        #     labels.append(cls_labels)
+        # else:
+        #     cls_dets, _ = nms_op(cls_dets, **nms_cfg_)
+        #     cls_labels = multi_bboxes.new_full((cls_dets.shape[0], ),
+        #                                        i - 1,
+        #                                        dtype=torch.long)
+        #     bboxes.append(cls_dets)
+        #     labels.append(cls_labels)
         cls_dets, _ = nms_op(cls_dets, **nms_cfg_)
-        cls_labels = multi_bboxes.new_full((cls_dets.shape[0], ),
+        cls_labels = multi_bboxes.new_full((cls_dets.shape[0],),
                                            i - 1,
                                            dtype=torch.long)
         bboxes.append(cls_dets)

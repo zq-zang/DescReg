@@ -8,8 +8,8 @@ from mmcv.runner import DistSamplerSeedHook, Runner, obj_from_dict
 
 from mmdet import datasets
 from mmdet.core import (CocoDistEvalmAPHook, CocoDistEvalRecallHook,
-                        DistEvalmAPHook, DistOptimizerHook, Fp16OptimizerHook)
-from mmdet.datasets import DATASETS, build_dataloader
+                        DistEvalmAPHook, DistOptimizerHook, Fp16OptimizerHook, DistEvalHook)
+from mmdet.datasets import DATASETS, build_dataloader, build_dataset
 from mmdet.models import RPN
 from .env import get_root_logger
 
@@ -168,6 +168,10 @@ def _dist_train(model, dataset, cfg, validate=False):
     runner.register_training_hooks(cfg.lr_config, optimizer_config,
                                    cfg.checkpoint_config, cfg.log_config)
     runner.register_hook(DistSamplerSeedHook())
+    if model.module.train_stage == 2:
+        cfg.data.test.test_mode=True
+        dataset = build_dataset(cfg.data.test)
+        runner.register_hook(DistEvalHook(dataset, 'results/test_tmp.pkl'))# to move to config file
     # register eval hooks
     if validate:
         val_dataset_cfg = cfg.data.val
@@ -224,6 +228,9 @@ def _non_dist_train(model, dataset, cfg, validate=False):
         optimizer_config = cfg.optimizer_config
     runner.register_training_hooks(cfg.lr_config, optimizer_config,
                                    cfg.checkpoint_config, cfg.log_config)
+
+    # dataset = build_dataset(cfg.data.test)
+    # runner.register_hook(DistEvalHook(dataset, 'results/test_tmp.pkl'))# to move to config file
 
     if cfg.resume_from:
         runner.resume(cfg.resume_from)

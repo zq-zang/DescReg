@@ -15,10 +15,11 @@ from .retinanet import RetinaNet
 from .rpn import RPN
 from .single_stage import SingleStageDetector
 from .two_stage import TwoStageDetector
+from .faster_rcnn_zsd import FasterRCNN_ZSD
 
 __all__ = [
     'BaseDetector', 'SingleStageDetector', 'TwoStageDetector', 'RPN',
     'FastRCNN', 'FasterRCNN', 'MaskRCNN', 'CascadeRCNN', 'HybridTaskCascade',
     'DoubleHeadRCNN', 'RetinaNet', 'FCOS', 'GridRCNN', 'MaskScoringRCNN',
-    'RepPointsDetector', 'FOVEA', 'CascadeSemanticRCNN'
+    'RepPointsDetector', 'FOVEA', 'CascadeSemanticRCNN', 'FasterRCNN_ZSD'
 ]

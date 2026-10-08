@@ -40,14 +40,19 @@ class CustomDataset(Dataset):
                  img_prefix='',
                  seg_prefix=None,
                  proposal_file=None,
-                 test_mode=False):
+                 test_mode=False,
+                 unseen_class_ids=None):
         self.ann_file = ann_file
         self.data_root = data_root
         self.img_prefix = img_prefix
         self.seg_prefix = seg_prefix
         self.proposal_file = proposal_file
         self.test_mode = test_mode
-
+        # if unseen_class_ids is None:
+        #     raise NotImplementedError
+        # else:
+        #     self.unseen_class_ids = unseen_class_ids
+        self.unseen_class_ids = unseen_class_ids
         # join paths if data_root is specified
         if self.data_root is not None:
             if not osp.isabs(self.ann_file):
@@ -77,6 +82,10 @@ class CustomDataset(Dataset):
             self._set_group_flag()
         # processing pipeline
         self.pipeline = Compose(pipeline)
+
+        if test_mode and self.zsd_test:
+            valid_inds = self._filter_imgs_zsd_test()
+            self.img_infos = [self.img_infos[i] for i in valid_inds]
 
     def __len__(self):
         return len(self.img_infos)
@@ -142,7 +151,12 @@ class CustomDataset(Dataset):
 
     def prepare_test_img(self, idx):
         img_info = self.img_infos[idx]
-        results = dict(img_info=img_info)
+        # print(img_info['file_name'])
+        # if img_info['file_name'] == 'cropped_1114_0_3.jpg':
+        #     print(img_info['file_name'])
+
+        ann_info = self.get_ann_info(idx)
+        results = dict(img_info=img_info, ann_info=ann_info)
         if self.proposals is not None:
             results['proposals'] = self.proposals[idx]
         self.pre_pipeline(results)

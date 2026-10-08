@@ -12,12 +12,14 @@ from torch.utils.data import Dataset
 
 from mmdet import datasets
 from .coco_utils import fast_eval_recall, results2json
-from .mean_ap import eval_map
+from .mean_ap import eval_map, gzsd_eval
+
+
 
 
 class DistEvalHook(Hook):
 
-    def __init__(self, dataset, interval=1):
+    def __init__(self, dataset, out, interval=1):
         if isinstance(dataset, Dataset):
             self.dataset = dataset
         elif isinstance(dataset, dict):
@@ -26,12 +28,20 @@ class DistEvalHook(Hook):
             raise TypeError(
                 'dataset must be a Dataset object or a dict, not {}'.format(
                     type(dataset)))
+        self.out = out
         self.interval = interval
+        self.evaluate = gzsd_eval
+        self.iou_thr = 0.5
+        self.num_seen_classes = len(dataset.seen_cat2label)
+        self.classwise = True
+        self.hm_best = 0.
+        self.hm_best_ptable = None
 
     def after_train_epoch(self, runner):
         if not self.every_n_epochs(runner, self.interval):
             return
         runner.model.eval()
+        runner.model.module.gzsd_mode = True
         results = [None for _ in range(len(self.dataset))]
         if runner.rank == 0:
             prog_bar = mmcv.ProgressBar(len(self.dataset))
@@ -45,7 +55,7 @@ class DistEvalHook(Hook):
             with torch.no_grad():
                 result = runner.model(
                     return_loss=False, rescale=True, **data_gpu)
-            results[idx] = result
+            results[idx] = result[0] # discard proposals
 
             batch_size = runner.world_size
             if runner.rank == 0:
@@ -61,16 +71,73 @@ class DistEvalHook(Hook):
                 for idx in range(i, len(results), runner.world_size):
                     results[idx] = tmp_results[idx]
                 os.remove(tmp_file)
-            self.evaluate(runner, results)
+            if self.out and runner.rank == 0:
+                print('\nwriting results to {}'.format(self.out))
+                mmcv.dump(results, self.out)
+            seen_mean_ap, unseen_mean_ap, eval_results, p_table =self.evaluate(self.out, self.dataset, iou_thr=self.iou_thr, num_seen_classes=self.num_seen_classes, classwise=self.classwise)
+            hm = 2 * seen_mean_ap * unseen_mean_ap / (seen_mean_ap + unseen_mean_ap + 1e-7)
+            if hm > self.hm_best:
+                self.hm_best_ptable = p_table
+                self.hm_best = hm
+            if runner.epoch == runner.max_epochs-1:
+                print('\n best performance:\n')
+                print(self.hm_best_ptable)
         else:
             tmp_file = osp.join(runner.work_dir,
                                 'temp_{}.pkl'.format(runner.rank))
             mmcv.dump(results, tmp_file)
             dist.barrier()
         dist.barrier()
+        runner.model.module.gzsd_mode = False
 
-    def evaluate(self):
-        raise NotImplementedError
+    # def before_train_epoch(self, runner):
+    #     if not self.every_n_epochs(runner, self.interval):
+    #         return
+    #     runner.model.eval()
+    #     runner.model.module.gzsd_mode = True
+    #     results = [None for _ in range(len(self.dataset))]
+    #     if runner.rank == 0:
+    #         prog_bar = mmcv.ProgressBar(len(self.dataset))
+    #     for idx in range(runner.rank, len(self.dataset), runner.world_size):
+    #         data = self.dataset[idx]
+    #         data_gpu = scatter(
+    #             collate([data], samples_per_gpu=1),
+    #             [torch.cuda.current_device()])[0]
+    #
+    #         # compute output
+    #         with torch.no_grad():
+    #             result = runner.model(
+    #                 return_loss=False, rescale=True, **data_gpu)
+    #         results[idx] = result[0] # discard proposals
+    #
+    #         batch_size = runner.world_size
+    #         if runner.rank == 0:
+    #             for _ in range(batch_size):
+    #                 prog_bar.update()
+    #
+    #     if runner.rank == 0:
+    #         print('\n')
+    #         dist.barrier()
+    #         for i in range(1, runner.world_size):
+    #             tmp_file = osp.join(runner.work_dir, 'temp_{}.pkl'.format(i))
+    #             tmp_results = mmcv.load(tmp_file)
+    #             for idx in range(i, len(results), runner.world_size):
+    #                 results[idx] = tmp_results[idx]
+    #             os.remove(tmp_file)
+    #         if self.out and runner.rank == 0:
+    #             print('\nwriting results to {}'.format(self.out))
+    #             mmcv.dump(results, self.out)
+    #         self.evaluate(self.out, self.dataset, iou_thr=self.iou_thr, num_seen_classes=self.num_seen_classes, classwise=self.classwise)
+    #
+    #     else:
+    #         tmp_file = osp.join(runner.work_dir,
+    #                             'temp_{}.pkl'.format(runner.rank))
+    #         mmcv.dump(results, tmp_file)
+    #         dist.barrier()
+    #     dist.barrier()
+    #     runner.model.module.gzsd_mode = False
+    # def evaluate(self):
+    #     raise NotImplementedError
 
 
 class DistEvalmAPHook(DistEvalHook):

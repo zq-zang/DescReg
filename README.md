@@ -37,6 +37,15 @@ python setup.py develop
     ```
 
 
+## Extensions in this fork (remote sensing / aerial datasets)
+
+This fork extends the original BLC code to DIOR, DOTA, xView and VisDrone:
+
+- Configs: `configs/BLC/train/FRCNN/`, `configs/BLC/train/Cascade_Semantic_R-CNN/` (`<dataset>_<arch>_<backbone>_{1st,2nd}_stage.py`) and `configs/BLC/inference/gzsd/`.
+- Datasets are **not** included in the repo. Put them under `data/dior/`, `data/dota/`, `data/xview/`, `data/visdrone/` (images, annotation json, and the per-dataset `sim_matrix_*.npy` / word-vector `.npy` referenced by the configs).
+- `tools/gen_embed_<dataset>.py` generates class embeddings and the semantic similarity matrices; previously generated outputs are kept in `assets/` (`sim_matrices/`, `embeddings/`, `dataset_info/`). Copy the needed file into `data/<dataset>/` before training.
+- Put ImageNet-pretrained backbones (e.g. `resnet152-b121ed2d.pth`, `resnext101_64x4d-ee2c6f71.pth`) in `pretrained/`.
+
 - training:
     - train BLRPN:
         - 48/17 split:

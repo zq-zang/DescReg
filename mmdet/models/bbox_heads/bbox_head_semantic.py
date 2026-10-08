@@ -11,6 +11,7 @@ from ..builder import build_loss
 from ..losses import accuracy
 from ..registry import HEADS
 from ..losses import LSoftmaxLinear
+from ..losses import SupConLoss_clear
 
 @HEADS.register_module
 class BBoxSemanticHead(nn.Module):
@@ -22,8 +23,11 @@ class BBoxSemanticHead(nn.Module):
                  with_reg=True,
                  with_semantic=True,
                  roi_feat_size=7,
+                 adj_matrix_file=None,
+                 pos_thr=0.2, loss_scale=0.5, margin_scale=2.0,
                  in_channels=256,
                  num_classes=66,
+                 unseen_class_ids=None,
                  semantic_dims=300,
                  seen_class=True,
                  gzsd=False,
@@ -54,7 +58,13 @@ class BBoxSemanticHead(nn.Module):
         self.roi_feat_size = _pair(roi_feat_size)
         self.roi_feat_area = self.roi_feat_size[0] * self.roi_feat_size[1]
         self.in_channels = in_channels
-        self.num_classes = num_classes
+        self.num_classes = num_classes # including background
+        if unseen_class_ids is not None:# specify the unseen ids, instead of last N class as unseen
+            self.unseen_class_ids=[u+1 for u in unseen_class_ids] # add 1 for background in the first dimension
+            self.bg_seen_class_ids=[i for i in range(len(unseen_class_ids)+num_classes) if i not in self.unseen_class_ids] # including bg
+            self.seen_class_ids=self.bg_seen_class_ids[1:]
+        else:
+            self.unseen_class_ids = None
         self.target_means = target_means
         self.target_stds = target_stds
         self.reg_class_agnostic = reg_class_agnostic
@@ -63,6 +73,11 @@ class BBoxSemanticHead(nn.Module):
 
         self.loss_bbox = build_loss(loss_bbox)
         self.loss_semantic = build_loss(loss_semantic)
+        self.loss_contrast = SupConLoss_clear(adj_matrix_file=adj_matrix_file,
+                                              pos_thr=pos_thr,
+                                              loss_scale=loss_scale,
+                                              margin_scale=margin_scale,
+                                              unseen_class_ids=unseen_class_ids)
 
         in_channels = self.in_channels
         if self.with_avg_pool:
@@ -74,30 +89,56 @@ class BBoxSemanticHead(nn.Module):
             out_dim_reg = 4 if reg_class_agnostic else 4 * num_classes
             self.fc_reg = nn.Linear(in_channels, out_dim_reg)
         if self.with_semantic:
-            self.fc_semantic = nn.Linear(self.in_channels, semantic_dims)
+            # self.fc_semantic = nn.Linear(self.in_channels, semantic_dims)
             # voc = np.loadtxt('MSCOCO/vocabulary_w2v.txt', dtype='float32', delimiter=',')
             if voc_path is not None:
                 voc = np.loadtxt(voc_path, dtype='float32', delimiter=',')
             else:
                 voc = None
             # vec = np.loadtxt('MSCOCO/word_w2v.txt', dtype='float32', delimiter=',')
-            vec_load = np.loadtxt(vec_path, dtype='float32', delimiter=',')
+            # vec_load = np.loadtxt(vec_path, dtype='float32', delimiter=',')
+            vec_load = np.load(vec_path).transpose(1,0)
             # if self.seen_class:
-            vec = vec_load[:, :num_classes]
-            # else:
-            vec_unseen = np.concatenate([vec_load[:, 0:1], vec_load[:, num_classes:]], axis=1)
+            vec_full = torch.tensor(vec_load, dtype=torch.float32)
+
+            # visual_embedding_path = './data/dior/dior_visual_desc_embed_sentence_transformer.npy'
+            # visual_embedding_load = np.load(visual_embedding_path).transpose(1, 0)
+            # visual_embedding_full = torch.tensor(visual_embedding_load, dtype=torch.float32)
+            # vec_full = torch.cat([visual_embedding_full, vec_full])
+            #
+            # vec_load = np.load(visual_embedding_path).transpose(1,0)
+            # vec_full = torch.tensor(vec_load, dtype=torch.float32)
+
+            if self.unseen_class_ids is not None:
+                # self.vec_background = nn.Parameter(vec_full[:, torch.tensor(self.bg_seen_class_ids)])
+                # self.vec_background_2 = nn.Parameter(vec_full[:, torch.tensor(self.bg_seen_class_ids)])
+                vec = vec_full[:, torch.tensor(self.bg_seen_class_ids)]
+                vec_unseen = np.concatenate([vec_full[:, 0:1], vec_full[:, torch.tensor(self.unseen_class_ids)]], axis=1)
+
+                self.vec_background = nn.Parameter(vec_full[:, 0:1])
+                self.vec_seen = nn.Parameter(vec_full[:, torch.tensor(self.seen_class_ids)])
+                self.vec_unseen = nn.Parameter(vec_full[:, torch.tensor(self.unseen_class_ids)])
+
+            else:
+                self.vec_background = nn.Parameter(vec_full[:, :num_classes])
+                self.vec_background_2 = nn.Parameter(vec_full[:, :num_classes])
+                vec = vec_full[:, :num_classes]
+                vec_unseen = np.concatenate([vec_full[:, 0:1], vec_full[:, num_classes:]], axis=1)
+
             vec = torch.tensor(vec, dtype=torch.float32)
             if voc is not None:
                 voc = torch.tensor(voc, dtype=torch.float32)
             vec_unseen = torch.tensor(vec_unseen, dtype=torch.float32)
             self.vec = vec.cuda()  # 300*n
+            self.vec_full = vec_full.cuda()
             if voc is not None:
                 self.voc = voc.cuda()  # 300*66
             else:
                self.voc = None
-            self.vec_unseen = vec_unseen.cuda()
+            # self.vec_unseen = vec_unseen.cuda()
             if self.voc is not None:
-                self.kernel_semantic = nn.Linear(self.voc.shape[1], self.vec.shape[0]) #n*300
+                self.kernel_semantic = nn.Linear(self.vec.shape[0], self.vec.shape[0]) #n*300
+
 
         if self.use_lsoftmax:
             self.lsoftmax = LSoftmaxLinear(num_classes, num_classes, margin=4)
@@ -107,12 +148,12 @@ class BBoxSemanticHead(nn.Module):
         if self.with_reg:
             nn.init.normal_(self.fc_reg.weight, 0, 0.001)
             nn.init.constant_(self.fc_reg.bias, 0)
-        if self.with_semantic:
-            nn.init.normal_(self.fc_semantic.weight, 0, 0.001)
-            nn.init.constant_(self.fc_semantic.bias, 0)
-            if self.voc is not None:
-                nn.init.normal_(self.kernel_semantic.weight, 0, 0.001)
-                nn.init.constant_(self.kernel_semantic.bias, 0)
+        # if self.with_semantic:
+        #     nn.init.normal_(self.fc_semantic.weight, 0, 0.001)
+        #     # nn.init.constant_(self.fc_semantic.bias, 0)
+        #     if self.voc is not None:
+        #         nn.init.normal_(self.kernel_semantic.weight, 0, 0.001)
+        #         nn.init.constant_(self.kernel_semantic.bias, 0)
 
     @auto_fp16()
     def forward(self, x):
@@ -150,6 +191,7 @@ class BBoxSemanticHead(nn.Module):
     @force_fp32(apply_to=('semantic_score', 'bbox_pred'))
     def loss(self,
              semantic_score,
+             semantic_feature,
              bbox_pred,
              labels,
              label_weights,
@@ -159,13 +201,25 @@ class BBoxSemanticHead(nn.Module):
         losses = dict()
         if semantic_score is not None:
             avg_factor = max(torch.sum(label_weights > 0).float().item(), 1.)
-            losses['loss_semantic'] = self.loss_semantic(
-                semantic_score,
-                labels,
-                label_weights,
-                avg_factor=avg_factor,
-                reduction_override=reduction_override)
-            losses['acc'] = accuracy(semantic_score, labels)
+            if self.train_stage == 2:
+                losses['loss_contrast'] = self.loss_contrast(semantic_feature, labels)
+            if isinstance(semantic_score, list):
+                for i, s in enumerate(semantic_score):
+                    losses['loss_semantic'+'_{}'.format(i)] = self.loss_semantic(
+                        s,
+                        labels,
+                        label_weights,
+                        avg_factor=avg_factor,
+                        reduction_override=reduction_override)
+                    losses['acc'+'_{}'.format(i)] = accuracy(s, labels)
+            else:
+                losses['loss_semantic'] = self.loss_semantic(
+                    semantic_score,
+                    labels,
+                    label_weights,
+                    avg_factor=avg_factor,
+                    reduction_override=reduction_override)
+                losses['acc'] = accuracy(semantic_score, labels)
         if bbox_pred is not None:
             pos_inds = labels > 0
             if self.reg_class_agnostic:
@@ -191,47 +245,88 @@ class BBoxSemanticHead(nn.Module):
                        scale_factor,
                        rescale=False,
                        cfg=None):
-        if isinstance(semantic_score, list):
-            semantic_score = sum(semantic_score) / float(len(semantic_score))
-        scores = F.softmax(semantic_score, dim=1) if semantic_score is not None else None
+        # if isinstance(semantic_score, list):
+        #     semantic_score = sum(semantic_score) / float(len(semantic_score))
+
+        # def softmax(x):
+        #     # Ensure that the function accepts a tensor
+        #     assert isinstance(x, torch.Tensor)
+        #
+        #     # Apply exponentiation
+        #     x_exp = torch.exp(x)
+        #     x_exp[:, -4:] *= 1.5
+        #     # Calculate the sum of the elements along the second dimension (classes)
+        #     x_sum = torch.sum(x_exp, dim=1, keepdim=True)
+        #
+        #     # Divide the result
+        #     result = x_exp / x_sum
+        #
+        #     return result
+        # semantic_score[:, 1:12] -= 1e5
+        # scores = F.softmax(semantic_score, dim=1) if not isinstance(semantic_score, list) else sum([F.softmax(s, dim=1) for s in semantic_score])/len(semantic_score)
+        scores = F.sigmoid(semantic_score) if self.use_sigmoid else F.softmax(semantic_score, dim=1)
+        # scores = torch.cat([scores[:, 20:], scores[:, :20]], dim=1)
+        # semantic_score_seen = semantic_score[:, :17]
+        # semantic_score_unseen = torch.cat([semantic_score[:, 0:1],semantic_score[:, 17:]],dim=1)
+        # semantic_score_seen = F.softmax(semantic_score_seen, dim=1)
+        # semantic_score_unseen = F.softmax(semantic_score_unseen, dim=1)
+        # scores = torch.cat([semantic_score_unseen[:, 0:1], semantic_score_seen[:, 1:], semantic_score_unseen[:, 1:]], dim=1)
+        # scores[:, 18:19] *= scores[:, 14:15]
+        # scores = softmax(semantic_score) if semantic_score is not None else None
         # scores = LSoftmaxLinear(semantic_score, dim=1) if semantic_score is not None else None
-
+        # scores[:, -1] *= 0.2
+        # semantic_score[:, 1:12] *= 0.0
         if self.gzsd:
-            seen_scores = torch.mm(scores, self.vec.t())
-            seen_scores = torch.mm(seen_scores, self.vec)
-            seen_bboxes = delta2bbox(rois[:, 1:], bbox_pred, self.target_means,
+            bboxes = delta2bbox(rois[:, 1:], bbox_pred, self.target_means,
                                      self.target_stds, img_shape)
-
-            unseen_scores = torch.mm(scores, self.vec.t())
-            unseen_scores = torch.mm(unseen_scores, self.vec_unseen)
-            unseen_bboxes = delta2bbox(rois[:, 1:], bbox_pred, self.target_means,
-                                     self.target_stds, img_shape)
-
             if rescale:
                 if isinstance(scale_factor, float):
-                    seen_bboxes /= scale_factor
-                    unseen_bboxes /= scale_factor
+                    bboxes /= scale_factor
                 else:
-                    seen_bboxes /= torch.from_numpy(scale_factor).to(seen_bboxes.device)
-                    unseen_bboxes /= torch.from_numpy(scale_factor).to(unseen_bboxes.device)
+                    bboxes /= torch.from_numpy(scale_factor).to(seen_bboxes.device)
+            # scores[:, :17] *= 0.0
+            det_bboxes, det_labels = multiclass_nms(bboxes, scores,
+                                                              0.0, cfg.nms,
+                                                              cfg.max_per_img)
 
-            if cfg is None:
-                return [seen_bboxes, unseen_bboxes], [seen_scores, unseen_scores]
-            else:
-                seen_det_bboxes, seen_det_labels = multiclass_nms(seen_bboxes, seen_scores,
-                                                        0.2, cfg.nms,
-                                                        cfg.max_per_img)
-                unseen_det_bboxes, unseen_det_labels = multiclass_nms(unseen_bboxes, unseen_scores,
-                                                                  0.05, cfg.nms,
-                                                                  cfg.max_per_img)
-                # unseen_det_labels += 65
-                # unseen_det_labels += 48
-                unseen_det_labels += (self.num_classes - 1)
+            return det_bboxes, det_labels
 
-                det_bboxes = torch.cat([seen_det_bboxes, unseen_det_bboxes], dim=0)
-                det_labels = torch.cat([seen_det_labels, unseen_det_labels], dim=0)
-                # return [seen_det_bboxes, unseen_det_bboxes], [seen_det_labels, unseen_det_labels]
-                return det_bboxes, det_labels
+            # seen_scores = torch.mm(scores, self.vec)
+            # vec_seen_normalize = nn.functional.normalize(self.vec, dim=1)
+            # seen_scores = torch.mm(seen_scores, vec_seen_normalize.t()).softmax(-1)
+            # seen_bboxes = delta2bbox(rois[:, 1:], bbox_pred, self.target_means,
+            #                          self.target_stds, img_shape)
+            #
+            # unseen_scores = torch.mm(scores, self.vec)
+            # vec_unseen_normalize = nn.functional.normalize(self.vec_unseen, dim=0)
+            # unseen_scores = torch.mm(unseen_scores, vec_unseen_normalize).softmax(-1)
+            # unseen_bboxes = delta2bbox(rois[:, 1:], bbox_pred, self.target_means,
+            #                          self.target_stds, img_shape)
+            # if rescale:
+            #     if isinstance(scale_factor, float):
+            #         seen_bboxes /= scale_factor
+            #         unseen_bboxes /= scale_factor
+            #     else:
+            #         seen_bboxes /= torch.from_numpy(scale_factor).to(seen_bboxes.device)
+            #         unseen_bboxes /= torch.from_numpy(scale_factor).to(unseen_bboxes.device)
+            #
+            # if cfg is None:
+            #     return [seen_bboxes, unseen_bboxes], [seen_scores, unseen_scores]
+            # else:
+            #     seen_det_bboxes, seen_det_labels = multiclass_nms(seen_bboxes, seen_scores,
+            #                                             0.2, cfg.nms,
+            #                                             cfg.max_per_img)
+            #     unseen_det_bboxes, unseen_det_labels = multiclass_nms(unseen_bboxes, unseen_scores,
+            #                                                       0.05, cfg.nms,
+            #                                                       cfg.max_per_img)
+            #     # unseen_det_labels += 65
+            #     # unseen_det_labels += 48
+            #     unseen_det_labels += (self.num_classes - 1)
+            #
+            #     det_bboxes = torch.cat([seen_det_bboxes, unseen_det_bboxes], dim=0)
+            #     det_labels = torch.cat([seen_det_labels, unseen_det_labels], dim=0)
+            #     # return [seen_det_bboxes, unseen_det_bboxes], [seen_det_labels, unseen_det_labels]
+            #     return det_bboxes, det_labels
 
         if self.seen_class:
             scores = torch.mm(scores, self.vec.t())

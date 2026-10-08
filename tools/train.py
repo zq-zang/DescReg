@@ -11,7 +11,6 @@ from mmdet.apis import (get_root_logger, init_dist, set_random_seed,
 from mmdet.datasets import build_dataset
 from mmdet.models import build_detector
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
     parser.add_argument('config', help='train config file path')
@@ -74,7 +73,7 @@ def main():
     # init logger before other steps
     logger = get_root_logger(cfg.log_level)
     logger.info('Distributed training: {}'.format(distributed))
-
+    logger.info(cfg.model.bbox_head)
     # set random seeds
     if args.seed is not None:
         logger.info('Set random seed to {}'.format(args.seed))
@@ -102,6 +101,8 @@ def main():
         distributed=distributed,
         validate=args.validate,
         logger=logger)
+
+
 
 
 if __name__ == '__main__':

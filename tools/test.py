@@ -15,25 +15,41 @@ from mmdet.core import coco_eval, results2json, wrap_fp16_model
 from mmdet.datasets import build_dataloader, build_dataset
 from mmdet.models import build_detector
 
+from mmdet import datasets
+from gzsd_eval import gzsd_eval
+from core.evaluation.coco_utils import fast_eval_recall
+import numpy
 
 def single_gpu_test(model, data_loader, show=False):
     model.eval()
     results = []
+    proposals = []
     dataset = data_loader.dataset
     prog_bar = mmcv.ProgressBar(len(dataset))
     for i, data in enumerate(data_loader):
         with torch.no_grad():
-            result = model(return_loss=False, rescale=not show, **data)
+            result, proposal = model(return_loss=False, rescale=not show, **{k: data[k] for k in ['img_meta', 'img'] if k in data})
+        # if i >= 300:
+        #     result[16] = numpy.empty((0, 5))
+        #     result[17] = numpy.empty((0, 5))
+        #     result[18] = numpy.empty((0, 5))
+        #     result[19] = numpy.empty((0, 5))
+        # if i < 300:
+            # result[16] = numpy.empty((0, 5))
+            # result[17] = result[13]
+            # result[18] = numpy.empty((0, 5))
+            # result[19] = numpy.empty((0, 5))
         results.append(result)
-
+        proposals.extend(proposal)
         if show:
-            # model.module.show_result(data, result)
-            model.module.show_result(data, result, score_thr=0.3)
+            model.module.show_result(data, result, score_thr=0.1)
+            # if 9 in dataset.get_ann_info(1)['labels']:
+            #     model.module.show_result(data, result, score_thr=0.2)
 
         batch_size = data['img'][0].size(0)
         for _ in range(batch_size):
             prog_bar.update()
-    return results
+    return results, proposals
 
 
 def multi_gpu_test(model, data_loader, tmpdir=None):
@@ -106,6 +122,7 @@ def parse_args():
     parser.add_argument('config', help='test config file path')
     parser.add_argument('checkpoint', help='checkpoint file')
     parser.add_argument('--out', help='output result file')
+    parser.add_argument('--out-proposals', help='output result file', default=None)
     parser.add_argument(
         '--json_out',
         help='output result file name without extension',
@@ -124,6 +141,18 @@ def parse_args():
         default='none',
         help='job launcher')
     parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument(
+        '--iou-thr',
+        type=float,
+        default=0.5,
+        help='IoU threshold for evaluation')
+    parser.add_argument(
+        '--num-seen',
+        type=int,
+        default=16,
+        help='seen classes num')
+    parser.add_argument(
+        '--classwise', action='store_true', help='whether eval class wise ap')
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
@@ -193,7 +222,7 @@ def main():
 
     if not distributed:
         model = MMDataParallel(model, device_ids=[0])
-        outputs = single_gpu_test(model, data_loader, args.show)
+        outputs, proposals = single_gpu_test(model, data_loader, args.show)
     else:
         model = MMDistributedDataParallel(model.cuda())
         outputs = multi_gpu_test(model, data_loader, args.tmpdir)
@@ -202,6 +231,8 @@ def main():
     if args.out and rank == 0:
         print('\nwriting results to {}'.format(args.out))
         mmcv.dump(outputs, args.out)
+        if args.out_proposals is not None:
+            mmcv.dump(proposals, args.out_proposals)
         eval_types = args.eval
         if eval_types:
             print('Starting evaluate {}'.format(' and '.join(eval_types)))
@@ -231,6 +262,14 @@ def main():
                 result_file = args.json_out + '.{}'.format(name)
                 results2json(dataset, outputs_, result_file)
 
+    cfg = mmcv.Config.fromfile(args.config)
+    # test_dataset = mmcv.runner.obj_from_dict(cfg.data.test, datasets)
+    test_dataset = dataset
+    print("evaluating proposal performance...")
+    # if args.out_proposals is not None:
+    #     fast_eval_recall(proposals, test_dataset, 1000)
+    print("evaluating GZSD performance...")
+    gzsd_eval(args.out, test_dataset, args.iou_thr, args.num_seen, args.classwise)
 
 if __name__ == '__main__':
     main()

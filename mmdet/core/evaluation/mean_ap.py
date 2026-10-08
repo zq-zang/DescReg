@@ -5,6 +5,7 @@ from terminaltables import AsciiTable
 from .bbox_overlaps import bbox_overlaps
 from .class_names import get_classes
 
+from mmdet.confusion_matrix import ConfusionMatrix
 
 def average_precision(recalls, precisions, mode='area'):
     """Calculate average precision (for single or multiple scales).
@@ -449,6 +450,69 @@ def zsd_eval_map(det_results,
 
     return mean_ap, eval_results
 
+def convert_detections(detections):
+    converted_detections = []
+
+    for i, img_detections in enumerate(detections):
+        converted_img_detections = []
+
+        for class_id, class_detections in enumerate(img_detections):
+            # Expand class detections to include class_id
+            class_detections_with_id = np.zeros((class_detections.shape[0], class_detections.shape[1] + 1))
+            class_detections_with_id[:, :-1] = class_detections
+            class_detections_with_id[:, -1] = class_id
+
+            converted_img_detections.append(class_detections_with_id)
+
+        # Stack all detections for this image
+        converted_img_detections = np.vstack(converted_img_detections)
+
+        converted_detections.append(converted_img_detections)
+
+    return converted_detections
+
+def combine_labels_and_bboxes(gt_labels, gt_bboxes):
+    combined_gt = []
+
+    for labels, bboxes in zip(gt_labels, gt_bboxes):
+        # Create an array of zeros with an extra column for the class id
+        combined = np.zeros((labels.shape[0], bboxes.shape[1] + 1))
+
+        # The first column is the class id
+        combined[:, 0] = labels
+
+        # The remaining columns are the bounding boxes
+        combined[:, 1:] = bboxes
+
+        combined_gt.append(combined)
+
+    return combined_gt
+
+def gzsd_eval(result_file, dataset, iou_thr=0.5, num_seen_classes=48, classwise=False):
+    det_results = mmcv.load(result_file)
+    gt_bboxes = []
+    gt_labels = []
+    for i in range(len(dataset)):
+        ann = dataset.get_ann_info(i)
+        bboxes = ann['bboxes']
+        labels = ann['labels']
+        gt_bboxes.append(bboxes)
+        gt_labels.append(labels)
+    gt_ignore = None
+    dataset_name = dataset.CLASSES
+    if dataset.unseen_class_ids is not None:
+        dataset_name = [dataset_name[i] for i in dataset.seen_cat2label.keys()] + [dataset_name[i] for i in dataset.unseen_cat2label.keys()]
+    return gzsd_eval_map(
+            det_results,
+            gt_bboxes,
+            gt_labels,
+            gt_ignore=gt_ignore,
+            scale_ranges=None,
+            iou_thr=iou_thr,
+            dataset=dataset_name,
+            num_classes=len(dataset_name),
+            num_seen_classes=num_seen_classes,
+            class_wise=classwise)
 
 def gzsd_eval_map(det_results,
              gt_bboxes,
@@ -478,7 +542,6 @@ def gzsd_eval_map(det_results,
     Returns:
         tuple: (mAP, [dict, dict, ...])
     """
-
     assert len(det_results) == len(gt_bboxes) == len(gt_labels)
     if gt_ignore is not None:
         assert len(gt_ignore) == len(gt_labels)
@@ -492,6 +555,14 @@ def gzsd_eval_map(det_results,
     gt_labels = [
         label if label.ndim == 1 else label[:, 0] for label in gt_labels
     ]
+
+    # calculate confusion
+    gts = combine_labels_and_bboxes(gt_labels, gt_bboxes)
+    dets = convert_detections(det_results)
+    confusion_a = ConfusionMatrix(len(det_results[0]), 0.05)
+    for i, (g, d) in enumerate(zip(gts, dets)):
+        g[:, 0] -= 1
+        confusion_a.process_batch(d, g)
 
     for i in range(num_classes):
         # get gt and det bboxes of this class
@@ -570,10 +641,10 @@ def gzsd_eval_map(det_results,
         seen_mean_ap = np.array(aps[:num_seen_classes-nogt_class]).mean().item() if aps else 0.0
         unseen_mean_ap = np.array(aps[num_seen_classes-nogt_class:]).mean().item() if aps else 0.0
 
-    print_gzsd_summary(seen_mean_ap, unseen_mean_ap, eval_results, dataset, area_ranges, num_classes=num_classes,
+    p_table= print_gzsd_summary(seen_mean_ap, unseen_mean_ap, eval_results, dataset, area_ranges, num_classes=num_classes,
                        num_seen_classes=num_seen_classes, class_wise=class_wise)
 
-    return seen_mean_ap, unseen_mean_ap, eval_results
+    return seen_mean_ap, unseen_mean_ap, eval_results, p_table
 
 
 def print_map_summary(mean_ap, results, dataset=None, ranges=None):
@@ -727,7 +798,7 @@ def print_gzsd_summary(seen_mean_ap, unseen_mean_ap, results, dataset=None, rang
         if cls_result['recall'].size > 0:
             unseen_recalls[:, i] = np.array(cls_result['recall'], ndmin=2)[:, -1]
         unseen_aps[:, i] = cls_result['ap']
-    hm_ap = 2 * seen_mean_ap * unseen_mean_ap / (seen_mean_ap + unseen_mean_ap)
+    hm_ap = 2 * seen_mean_ap * unseen_mean_ap / (seen_mean_ap + unseen_mean_ap + 1e-7)
     if not isinstance(seen_mean_ap, list):
         seen_mean_ap = [seen_mean_ap]
     if not isinstance(unseen_mean_ap, list):
@@ -765,6 +836,7 @@ def print_gzsd_summary(seen_mean_ap, unseen_mean_ap, results, dataset=None, rang
             table = AsciiTable(table_data)
             table.inner_footing_row_border = False
             print(table.table)
+            return table.table
     else:
         for i in range(num_scales):
             table_data = []

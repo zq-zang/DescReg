@@ -12,6 +12,7 @@ from .base import BaseDetector
 from .test_mixins import RPNTestMixin
 from ..losses import LSoftmaxLinear, CenterLoss
 
+from mmdet.models.backbones.seresnext import se_resnext101
 
 @DETECTORS.register_module
 class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
@@ -19,6 +20,8 @@ class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
     def __init__(self,
                  num_stages,
                  backbone,
+                 train_stage,
+                 freeze_detector=False,
                  neck=None,
                  shared_head=None,
                  rpn_head=None,
@@ -41,6 +44,7 @@ class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
 
         self.num_stages = num_stages
         self.backbone = builder.build_backbone(backbone)
+        # self.backbone = se_resnext101()
 
         if neck is not None:
             self.neck = builder.build_neck(neck)
@@ -99,6 +103,7 @@ class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
         else:
             self.context_head = None
         self.semantic_info_flow = semantic_info_flow
+        self.train_stage = train_stage
         self.use_lsoftmax = use_lfostmax
         if self.use_lsoftmax:
             self.lsoftmax = LSoftmaxLinear(49, 49, margin=3)
@@ -106,6 +111,7 @@ class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
         if self.use_center_loss:
             self.center_loss = CenterLoss(num_classes=49, feat_dim=300)
         self.gzsd_mode = gzsd_mode
+        self.freeze_detector = freeze_detector
         self.init_weights(pretrained=pretrained)
 
     @property
@@ -133,6 +139,22 @@ class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
                 if not self.share_roi_extractor:
                     self.mask_roi_extractor[i].init_weights()
                 self.mask_head[i].init_weights()
+
+        if self.freeze_detector:
+            if self.train_stage == 2:
+                for m in [self.backbone, self.neck, self.rpn_head, self.bbox_head]:
+                    for (k, v) in m.named_parameters():
+                        if 'projector' in k or 'vec_background' in k:
+                            v.requires_grad = True
+                        else:
+                            v.requires_grad = False
+            elif self.train_stage == 3:
+                for m in [self.backbone, self.neck, self.rpn_head, self.bbox_head]:
+                    for (k, v) in m.named_parameters():
+                        if 'graph_relation_mixer' in k:
+                            v.requires_grad = True
+                        else:
+                            v.requires_grad = False
 
     def extract_feat(self, img):
         x = self.backbone(img)
@@ -287,7 +309,7 @@ class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
             else:
                 # TODO ZSD
                 if not self.use_center_loss:
-                    cls_score, bbox_pred = bbox_head(bbox_feats, None, context_feats, return_feats=False,
+                    cls_score, bbox_pred, semantic_feat = bbox_head(bbox_feats, None, context_feats, return_feats=False,
                                                      resturn_center_feats=False)
                 else:
                     cls_score, bbox_pred, center_feat = bbox_head(bbox_feats, None, context_feats, return_feats=False,
@@ -302,7 +324,7 @@ class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
             if self.use_center_loss:
                 center_loss = self.center_loss(center_feat, bbox_targets[0])
                 losses['s{}.{}'.format(i, 'center_loss')] = (center_loss*lw) * 0.1
-            loss_bbox = bbox_head.loss(cls_score, bbox_pred, *bbox_targets)
+            loss_bbox = bbox_head.loss(cls_score, semantic_feat, bbox_pred, *bbox_targets)
             for name, value in loss_bbox.items():
                 losses['s{}.{}'.format(i, name)] = (
                     value * lw if 'loss' in name else value)
@@ -412,7 +434,7 @@ class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
                 cls_score, bbox_pred = bbox_head(bbox_feats, last_feat, context_feats, return_feats=False)
             else:
                 # ZSD
-                cls_score, bbox_pred = bbox_head(bbox_feats, None, context_feats, return_feats=False)
+                cls_score, bbox_pred, semantic_feat = bbox_head(bbox_feats, None, context_feats, return_feats=False)
                 # OD
                 # cls_score, bbox_pred = bbox_head(bbox_feats)
 
@@ -460,12 +482,46 @@ class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
                             ori_shape, scale_factor, rescale)
                     ms_segm_result['stage{}'.format(i)] = segm_result
 
-            if i < self.num_stages - 1:
-                bbox_label = cls_score.argmax(dim=1)
-                rois = bbox_head.regress_by_class(rois, bbox_label, bbox_pred,
-                                                  img_meta[0])
+            def index_attribute_tensor(attribute_tensor, most_similar_indices):
+                # Expand indices tensor to match batch size
+                expanded_indices = most_similar_indices.expand(attribute_tensor.shape[0], -1)  # Shape: [Batch_size, 4]
 
-        cls_score = sum(ms_scores) / self.num_stages
+                # Use advanced indexing to get corresponding vectors
+                result = attribute_tensor[torch.arange(attribute_tensor.shape[0])[:, None], expanded_indices]
+
+                return result  # Shape: [Batch_size, 4, D]
+
+            def most_similar_classes(A, B):
+
+                # Normalizing the vectors before calculating cosine similarity
+                A_norm = A / A.norm(dim=1)[:, None]
+                B_norm = B / B.norm(dim=1)[:, None]
+
+                # Calculating cosine similarity
+                sim = torch.mm(A_norm, B_norm.transpose(0, 1))  # Shape: [4, 16]
+
+                # Getting the index of the most similar class in B for each class in A
+                most_similar_indices = sim.argmax(dim=1)  # Shape: [4]
+
+                return most_similar_indices
+
+            if bbox_pred.size(1)>4:
+                mostsimilar_class = most_similar_classes(self.bbox_head[0].vec_unseen[:, 1:].t(), self.bbox_head[0].vec[:, 1:].t())
+                mostsimilar_class_boxpred = index_attribute_tensor(bbox_pred.view(cls_score.size(0), -1, 4)[:, 1:], mostsimilar_class)
+
+                # bbox_pred_mean = bbox_pred.view(cls_score.size(0), -1, 4)[:, 1:].mean(1).unsqueeze(1).expand(-1, 20 - 16, -1)
+                bbox_pred = torch.cat([bbox_pred.view(cls_score.size(0), -1, 4), mostsimilar_class_boxpred], dim=1)
+                bbox_pred = bbox_pred.view(cls_score.size(0), -1)
+
+            if i < self.num_stages - 1:
+                bbox_label = cls_score.argmax(dim=1) if not isinstance(cls_score, list) else cls_score[0].argmax(dim=1)
+                rois = bbox_head.regress_by_class(rois, bbox_label, bbox_pred, img_meta[0])
+
+        if isinstance(ms_scores[0], list):
+            cls_score = [sum([ms[0] for ms in ms_scores])/self.num_stages, sum([ms[1] for ms in ms_scores])/self.num_stages]
+        else:
+            cls_score = sum(ms_scores) / self.num_stages
+        fg_score = proposal_list[0][:, 4:5]
         det_bboxes, det_labels = self.bbox_head[-1].get_det_bboxes(
             rois,
             cls_score,
@@ -479,10 +535,16 @@ class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
         if self.gzsd_mode:
             if self.bbox_head[-1].num_classes == 66:
                 results = bbox2result(det_bboxes, det_labels, 65+15+1)
-            else:
+            elif self.bbox_head[-1].num_classes == 48:
                 results = bbox2result(det_bboxes, det_labels, 48+17+1)
+            elif self.bbox_head[-1].num_classes == 17:
+                results = bbox2result(det_bboxes, det_labels, 16 + 4 + 1)
+            elif self.bbox_head[-1].num_classes == 12:
+                results = bbox2result(det_bboxes, det_labels, 11 + 4 + 1)
+            elif self.bbox_head[-1].num_classes == 49:
+                results = bbox2result(det_bboxes, det_labels, 48 + 12 + 1)
 
-            return results
+            return results, [p.cpu().numpy() for p in proposal_list]
 
         bbox_result = bbox2result(det_bboxes, det_labels,
                                   self.bbox_head[-1].num_classes)
@@ -587,7 +649,7 @@ class CascadeSemanticRCNN(BaseDetector, RPNTestMixin):
                     cls_score, bbox_pred = bbox_head(bbox_feats, last_feat, None, return_feats=False)
                 else:
                     # ZSD
-                    cls_score, bbox_pred = bbox_head(bbox_feats, None, None, return_feats=False)
+                    cls_score, bbox_pred, _ = bbox_head(bbox_feats, None, None, return_feats=False)
                     # OD
                     # cls_score, bbox_pred = bbox_head(bbox_feats)
 

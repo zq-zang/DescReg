@@ -4,7 +4,7 @@ from .class_names import (coco_classes, dataset_aliases, get_classes,
 from .coco_utils import coco_eval, fast_eval_recall, results2json
 from .eval_hooks import (CocoDistEvalmAPHook, CocoDistEvalRecallHook,
                          DistEvalHook, DistEvalmAPHook)
-from .mean_ap import average_precision, eval_map, print_map_summary, zsd_eval_map, gzsd_eval_map
+from .mean_ap import average_precision, eval_map, print_map_summary, zsd_eval_map, gzsd_eval_map, gzsd_eval
 from .recall import (eval_recalls, plot_iou_recall, plot_num_recall,
                      print_recall_summary)
 
@@ -14,5 +14,5 @@ __all__ = [
     'fast_eval_recall', 'results2json', 'DistEvalHook', 'DistEvalmAPHook',
     'CocoDistEvalRecallHook', 'CocoDistEvalmAPHook', 'average_precision',
     'eval_map', 'print_map_summary', 'eval_recalls', 'print_recall_summary',
-    'plot_num_recall', 'plot_iou_recall', 'zsd_eval_map', 'gzsd_eval_map'
+    'plot_num_recall', 'plot_iou_recall', 'zsd_eval_map', 'gzsd_eval_map', 'gzsd_eval'
 ]

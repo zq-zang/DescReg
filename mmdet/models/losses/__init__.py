@@ -10,11 +10,14 @@ from .smooth_l1_loss import SmoothL1Loss, smooth_l1_loss
 from .utils import reduce_loss, weight_reduce_loss, weighted_loss
 from .lsoftmax import LSoftmaxLinear
 from .center_loss import CenterLoss
+from .feature_contrast_loss import SupConLoss_clear
+
 __all__ = [
     'accuracy', 'Accuracy', 'cross_entropy', 'binary_cross_entropy',
     'mask_cross_entropy', 'CrossEntropyLoss', 'sigmoid_focal_loss',
     'FocalLoss', 'smooth_l1_loss', 'SmoothL1Loss', 'balanced_l1_loss',
     'BalancedL1Loss', 'mse_loss', 'MSELoss', 'iou_loss', 'bounded_iou_loss',
     'IoULoss', 'BoundedIoULoss', 'GHMC', 'GHMR', 'reduce_loss',
-    'weight_reduce_loss', 'weighted_loss', 'LSoftmaxLinear', 'CenterLoss'
+    'weight_reduce_loss', 'weighted_loss', 'LSoftmaxLinear', 'CenterLoss',
+    'SupConLoss_clear'
 ]
